@@ -2,7 +2,7 @@ name: dota-bot
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # каждые 10 минут
+    - cron: "*/1 * * * *"   # каждые 10 минут
   workflow_dispatch:          # ручной запуск кнопкой
 
 concurrency: dota-bot
