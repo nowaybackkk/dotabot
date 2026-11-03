@@ -1,0 +1,12 @@
+{
+ "owner": null,
+ "account_id": null,
+ "mmr": null,
+ "behavior": null,
+ "last_match_id": 0,
+ "games_since_check": 0,
+ "total_games": 0,
+ "wins": 0,
+ "offset": 0,
+ "history": []
+}
