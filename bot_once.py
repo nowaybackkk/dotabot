@@ -14,7 +14,7 @@ STATE_FILE = "state.json"
 BEHAVIOR_EVERY = 15      # раз в сколько игр просить порядочность
 MMR_STEP = 25            # оценка MMR за игру, пока вы не нажали кнопку
 RANKED_LOBBY = 7
-BTN_MIN, BTN_MAX = 22, 27  # диапазон кнопок под отчётом
+GAIN_MIN, GAIN_MAX = 20, 30  # диапазон возможного изменения MMR за игру (кнопки)
 STATS_DAYS = 5
 
 DEFAULT = {
@@ -119,13 +119,15 @@ def period_stats(st, days=STATS_DAYS):
     )
 
 
-def keyboard(match_id, win):
-    sign = "+" if win else "-"
-    row = [
-        {"text": f"{sign}{v}", "callback_data": f"d:{match_id}:{v}"}
-        for v in range(BTN_MIN, BTN_MAX + 1)
+def keyboard(match_id, win, before):
+    """Кнопки с итоговым рейтингом; нажатие выставляет именно это число."""
+    sign = 1 if win else -1
+    buttons = [
+        {"text": str(before + sign * v), "callback_data": f"a:{match_id}:{before + sign * v}"}
+        for v in range(GAIN_MIN, GAIN_MAX + 1)
     ]
-    return {"inline_keyboard": [row]}
+    rows = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
+    return {"inline_keyboard": rows}
 
 
 def apply_exact(st, idx, mag):
@@ -144,6 +146,8 @@ def apply_exact(st, idx, mag):
             break
         if "m" in e:
             e["m"] += diff
+        if "b" in e:
+            e["b"] += diff
     if not synced and st["mmr"] is not None:
         st["mmr"] += diff
     return g, exact
@@ -173,9 +177,9 @@ def handle_message(st, msg):
                    "/last — последняя игра\n"
                    "/5days — статистика за 5 дней\n"
                    "/stats — общая статистика\n"
-                   "/d <число> — точный MMR последней игры (если не нажал кнопку)\n"
+                   "/d <число> — точное изменение MMR последней игры (если нет подходящей кнопки)\n"
                    "/reset — обнулить статистику\n\n"
-                   "Под каждым отчётом будут кнопки — нажми, сколько MMR реально дали.")
+                   "Под каждым рейтинговым отчётом будут кнопки с итоговым рейтингом — нажми свой, и я исправлю сообщение.")
     elif cmd == "/link":
         if not arg.isdigit():
             return send(chat, "Использование: /link 123456789")
@@ -264,18 +268,30 @@ def handle_callback(st, cq):
     if chat is None or chat != st["owner"]:
         return answer("Нет доступа")
     parts = (cq.get("data") or "").split(":")
-    if len(parts) != 3 or parts[0] != "d":
+    if len(parts) != 3 or parts[0] not in ("a", "d"):
         return answer("")
-    match_id, mag = int(parts[1]), int(parts[2])
+    match_id, value = int(parts[1]), int(parts[2])
     idx = next((i for i, g in enumerate(st["history"]) if g.get("id") == match_id), None)
     if idx is None:
         return answer("Игра уже не найдена в истории")
 
+    g = st["history"][idx]
+    if parts[0] == "a":   # нажат итоговый рейтинг
+        if "b" not in g:
+            return answer("Для этой игры используй /d")
+        change = value - g["b"]
+        if (g["win"] and change <= 0) or (not g["win"] and change >= 0):
+            return answer("Не сходится с рейтингом до игры. Сверь рейтинг: /mmr")
+        mag = abs(change)
+    else:                 # старые кнопки с изменением
+        mag = value
     g, exact = apply_exact(st, idx, mag)
     answer(f"Записано: {sg(exact)} MMR")
 
     lines = msg.get("text", "").split("\n")
-    lines = [f"MMR: {g['m']} ({sg(exact)} ✅)" if ln.startswith("MMR:") else ln for ln in lines]
+    new_line = (f"MMR: {g['b']} → {g['m']} ({sg(exact)} ✅)" if "b" in g
+                else f"MMR: {g['m']} ({sg(exact)} ✅)")
+    lines = [new_line if ln.startswith("MMR:") else ln for ln in lines]
     try:
         tg("editMessageText", chat_id=chat, message_id=msg["message_id"],
            text="\n".join(lines), disable_web_page_preview=True)
@@ -300,10 +316,11 @@ def check_matches(st):
         if st["mmr"] is None:
             mmr_line = "MMR: не задан (/mmr)"
         elif ranked and end > st["mmr_at"]:
+            before = st["mmr"]
             delta = MMR_STEP if win else -MMR_STEP
             st["mmr"] += delta
-            mmr_line = f"MMR: {st['mmr']} ({sg(delta)}, примерно — нажми точное значение ⬇️)"
-            markup = keyboard(m["match_id"], win)
+            mmr_line = f"MMR: {before} → ≈{st['mmr']} (выбери точный итог ⬇️)"
+            markup = keyboard(m["match_id"], win, before)
         elif ranked:
             mmr_line = f"MMR: {st['mmr']} (игра закончилась до ввода рейтинга)"
         else:
@@ -315,6 +332,7 @@ def check_matches(st):
         entry = {"id": m["match_id"], "t": m["start_time"], "win": win, "d": delta, "r": delta != 0}
         if delta != 0:
             entry["m"] = st["mmr"]
+            entry["b"] = st["mmr"] - delta
         st["history"].append(entry)
         cutoff = time.time() - 30 * 86400
         st["history"] = [g for g in st["history"] if g["t"] >= cutoff]
