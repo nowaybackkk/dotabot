@@ -143,7 +143,71 @@ def beh_text(st):
     return f"Порядочность: {st['behavior']}" if st["behavior"] is not None else "Порядочность: не задана (/behavior)"
 
 
-def report(m, mmr_line, beh_line):
+def analyze(m):
+    """Оценка вашего вклада по цифрам матча. Возвращает (вердикт, причины) или None."""
+    full = od(f"/matches/{m['match_id']}")
+    players = full.get("players") or []
+    me = next((p for p in players if p.get("player_slot") == m["player_slot"]), None)
+    if not me or len(players) < 10:
+        return None
+    if m["duration"] < 15 * 60:
+        return ("⚪ Игра закончилась слишком рано для оценки", None)
+
+    def g(p, key):
+        return p.get(key) or 0
+
+    mine_side = me["player_slot"] < 128
+    team = [p for p in players if (p["player_slot"] < 128) == mine_side]
+    foes = [p for p in players if (p["player_slot"] < 128) != mine_side]
+    team_sorted = sorted(team, key=lambda p: -g(p, "gold_per_min"))
+    foes_sorted = sorted(foes, key=lambda p: -g(p, "gold_per_min"))
+    pos = team_sorted.index(me)          # 0 = лучший фарм в команде ... 4 = худший
+
+    t_deaths = sum(g(p, "deaths") for p in team) or 1
+    t_kills = sum(g(p, "kills") for p in team) or 1
+    t_dmg = sum(g(p, "hero_damage") for p in team) or 1
+    deaths = g(me, "deaths")
+    death_share = deaths / t_deaths
+    dmg_share = g(me, "hero_damage") / t_dmg
+    exp_dmg = [0.28, 0.25, 0.20, 0.15, 0.12][pos]
+    my_gpm = g(me, "gold_per_min")
+    foe_gpm = g(foes_sorted[pos], "gold_per_min") if len(foes_sorted) > pos else 0
+    kp = (g(me, "kills") + g(me, "assists")) / t_kills
+
+    parts = []   # (баллы, текст)
+    pts = -1 if (deaths >= 5 and death_share >= 0.27) else (1 if death_share <= 0.12 else 0)
+    parts.append((pts, f"Смерти {deaths} из {t_deaths} ({death_share:.0%})"))
+    ratio = dmg_share / exp_dmg
+    pts = 1 if ratio >= 1.2 else (-1 if ratio <= 0.7 else 0)
+    parts.append((pts, f"Урон {dmg_share:.0%} команды (ожид. ~{exp_dmg:.0%})"))
+    if foe_gpm:
+        r = my_gpm / foe_gpm
+        pts = 1 if r >= 1.10 else (-1 if r <= 0.90 else 0)
+        parts.append((pts, f"Фарм {my_gpm} против {foe_gpm} у соперника"))
+    low = 0.30 if pos <= 1 else 0.40
+    pts = 1 if kp >= 0.65 else (-1 if kp <= low else 0)
+    parts.append((pts, f"Участие в убийствах {kp:.0%}"))
+
+    score = sum(p for p, _ in parts)
+    win = is_win(m)
+    if win:
+        verdict = ("🌟 Сильная игра — ты тащил" if score >= 2
+                   else "🟡 Нормальная игра" if score >= 0
+                   else "🟠 Победа в основном благодаря команде")
+    else:
+        verdict = ("🟢 Не твоя вина — ты играл выше команды" if score >= 2
+                   else "🟡 Нейтрально — на уровне команды" if score >= 0
+                   else "🟠 Вклад чуть ниже ожидаемого" if score == -1
+                   else "🔴 Твой вклад заметно ниже ожидаемого")
+    verdict += f" (поз. {pos + 1} по фарму)"
+
+    key = [x for x in parts if x[0] != 0]
+    key.sort(key=lambda x: -abs(x[0]))
+    reasons = " · ".join(f"{'👍' if pt > 0 else '👎'} {tx}" for pt, tx in key[:2]) or "все показатели в норме"
+    return (verdict, reasons)
+
+
+def report(m, mmr_line, beh_line, analysis=None):
     win = is_win(m)
     hero = heroes().get(m["hero_id"], f"hero {m['hero_id']}")
     mins, secs = divmod(m["duration"], 60)
@@ -151,6 +215,11 @@ def report(m, mmr_line, beh_line):
     kda = (k + a) / max(d, 1)
     mode = MODES.get(m.get("game_mode"), f"режим {m.get('game_mode', '?')}")
     kind = "Рейтинг" if m.get("lobby_type") == RANKED_LOBBY else "Обычная игра"
+    extra = ""
+    if analysis:
+        extra = f"⚖️ Вердикт по цифрам: {analysis[0]}\n"
+        if analysis[1]:
+            extra += f"📝 Почему: {analysis[1]}\n"
     return (
         f"{'🏆 ПОБЕДА' if win else '💀 ПОРАЖЕНИЕ'}\n{DIV}\n"
         f"🦸 Герой: {hero}\n"
@@ -160,8 +229,17 @@ def report(m, mmr_line, beh_line):
         f"🎲 Режим: {mode} · {kind}\n{DIV}\n"
         f"💎 {mmr_line}\n"
         f"🧠 {beh_line}\n"
+        f"{extra}"
         f"🔗 Матч на OpenDota"
     )
+
+
+def safe_analyze(m):
+    try:
+        return analyze(m)
+    except Exception as e:
+        print("analysis error:", e)
+        return None
 
 
 def period_stats(st, days=STATS_DAYS):
@@ -338,7 +416,8 @@ def handle_message(st, msg):
         if not ms:
             return send(chat, "Матчей не найдено.")
         mmr_line = f"MMR: {st['mmr']}{goal_txt(st)}" if st["mmr"] is not None else "MMR: не задан (/mmr)"
-        send(chat, report(ms[0], mmr_line, beh_text(st)), fancy=True, match_id=ms[0]["match_id"])
+        send(chat, report(ms[0], mmr_line, beh_text(st), safe_analyze(ms[0])),
+             fancy=True, match_id=ms[0]["match_id"])
     elif cmd == "/reset":
         st["history"] = []
         st["total_games"] = st["wins"] = st["games_since_check"] = 0
@@ -438,7 +517,8 @@ def check_matches(st):
         cutoff = time.time() - 30 * 86400
         st["history"] = [g for g in st["history"] if g["t"] >= cutoff]
 
-        send(st["owner"], report(m, mmr_line, beh_text(st)), markup, fancy=True, match_id=m["match_id"])
+        send(st["owner"], report(m, mmr_line, beh_text(st), safe_analyze(m)), markup,
+             fancy=True, match_id=m["match_id"])
 
         if st["games_since_check"] >= BEHAVIOR_EVERY:
             send(st["owner"], f"🔔 Сыграно {BEHAVIOR_EVERY} игр. Зайди в Dota 2, посмотри "
