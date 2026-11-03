@@ -1,7 +1,7 @@
 """
 Dota 2 -> Telegram бот для запуска по расписанию (GitHub Actions).
-Каждый запуск: читает команды, проверяет новые матчи, шлёт отчёты, сохраняет state.json.
-Только стандартная библиотека Python, ничего устанавливать не нужно.
+Каждый запуск: читает команды и нажатия кнопок, проверяет новые матчи,
+шлёт отчёты, сохраняет state.json. Только стандартная библиотека Python.
 """
 import json
 import os
@@ -11,18 +11,22 @@ import urllib.request
 TOKEN = os.environ["BOT_TOKEN"]
 OPENDOTA = "https://api.opendota.com/api"
 STATE_FILE = "state.json"
-BEHAVIOR_EVERY = 15
-MMR_STEP = 25
+BEHAVIOR_EVERY = 15      # раз в сколько игр просить порядочность
+MMR_STEP = 25            # оценка MMR за игру, пока вы не нажали кнопку
 RANKED_LOBBY = 7
+BTN_MIN, BTN_MAX = 22, 27  # диапазон кнопок под отчётом
+STATS_DAYS = 5
 
 DEFAULT = {
     "owner": None, "account_id": None, "mmr": None, "behavior": None,
     "last_match_id": 0, "games_since_check": 0, "total_games": 0,
     "wins": 0, "offset": 0, "history": [],
+    "since": 0,    # игры, закончившиеся до этого времени, игнорируются
+    "mmr_at": 0,   # MMR меняется только по играм, закончившимся после этого времени
 }
-STATS_DAYS = 5
 
 
+# ---------- сеть ----------
 def http(url, data=None):
     body = json.dumps(data).encode() if data is not None else None
     req = urllib.request.Request(
@@ -36,14 +40,32 @@ def tg(method, **params):
     return http(f"https://api.telegram.org/bot{TOKEN}/{method}", params)
 
 
-def send(chat, text):
-    tg("sendMessage", chat_id=chat, text=text, disable_web_page_preview=True)
+def send(chat, text, markup=None):
+    p = {"chat_id": chat, "text": text, "disable_web_page_preview": True}
+    if markup:
+        p["reply_markup"] = markup
+    tg("sendMessage", **p)
 
 
 def od(path):
     return http(f"{OPENDOTA}{path}")
 
 
+_heroes = None
+
+
+def heroes():
+    """Список героев грузим только когда он нужен (экономим лимит OpenDota)."""
+    global _heroes
+    if _heroes is None:
+        try:
+            _heroes = {h["id"]: h["localized_name"] for h in od("/heroes")}
+        except Exception:
+            _heroes = {}
+    return _heroes
+
+
+# ---------- состояние ----------
 def load():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
@@ -52,6 +74,31 @@ def load():
         st = dict(DEFAULT)
     st["history"] = list(st["history"])
     return st
+
+
+def sg(n):
+    return f"+{n}" if n > 0 else str(n)
+
+
+def is_win(m):
+    return (m["player_slot"] < 128) == m["radiant_win"]
+
+
+def beh_text(st):
+    return f"Порядочность: {st['behavior']}" if st["behavior"] is not None else "Порядочность: не задана (/behavior)"
+
+
+def report(m, mmr_line, beh_line):
+    hero = heroes().get(m["hero_id"], f"hero {m['hero_id']}")
+    mins, secs = divmod(m["duration"], 60)
+    return (
+        f"{'🏆 ПОБЕДА' if is_win(m) else '💀 ПОРАЖЕНИЕ'}\n"
+        f"Герой: {hero}\n"
+        f"KDA: {m['kills']}/{m['deaths']}/{m['assists']}\n"
+        f"Длительность: {mins}:{secs:02d}\n"
+        f"{mmr_line}\n{beh_line}\n"
+        f"https://www.opendota.com/matches/{m['match_id']}"
+    )
 
 
 def period_stats(st, days=STATS_DAYS):
@@ -68,34 +115,45 @@ def period_stats(st, days=STATS_DAYS):
         f"📊 Статистика за {days} дней\n"
         f"Игр: {len(games)}\n"
         f"Победы: {wins} | Поражения: {losses} ({wr:.0f}% побед)\n"
-        f"MMR: {'+' if delta >= 0 else ''}{delta} (приблизительно)"
+        f"MMR: {sg(delta)}"
     )
 
 
-def is_win(m):
-    return (m["player_slot"] < 128) == m["radiant_win"]
+def keyboard(match_id, win):
+    sign = "+" if win else "-"
+    row = [
+        {"text": f"{sign}{v}", "callback_data": f"d:{match_id}:{v}"}
+        for v in range(BTN_MIN, BTN_MAX + 1)
+    ]
+    return {"inline_keyboard": [row]}
 
 
-def report(m, heroes, mmr_line, beh_line):
-    hero = heroes.get(m["hero_id"], f"hero {m['hero_id']}")
-    mins, secs = divmod(m["duration"], 60)
-    return (
-        f"{'🏆 ПОБЕДА' if is_win(m) else '💀 ПОРАЖЕНИЕ'}\n"
-        f"Герой: {hero}\n"
-        f"KDA: {m['kills']}/{m['deaths']}/{m['assists']}\n"
-        f"Длительность: {mins}:{secs:02d}\n"
-        f"{mmr_line}\n{beh_line}\n"
-        f"https://www.opendota.com/matches/{m['match_id']}"
-    )
+def apply_exact(st, idx, mag):
+    """Ставит точное изменение MMR для игры history[idx]. Возвращает (игра, значение)."""
+    g = st["history"][idx]
+    exact = mag if g["win"] else -mag
+    diff = exact - g["d"]
+    g["d"] = exact
+    if "m" in g:
+        g["m"] += diff
+    synced = False
+    for e in st["history"][idx + 1:]:
+        if e.get("adj"):           # дальше рейтинг уже сверен с реальным
+            e["d"] -= diff
+            synced = True
+            break
+        if "m" in e:
+            e["m"] += diff
+    if not synced and st["mmr"] is not None:
+        st["mmr"] += diff
+    return g, exact
 
 
-def beh_text(st):
-    return f"Порядочность: {st['behavior']}" if st["behavior"] is not None else "Порядочность: не задана (/behavior)"
-
-
-def handle(st, msg, heroes):
+# ---------- команды ----------
+def handle_message(st, msg):
     chat = msg["chat"]["id"]
     text = msg["text"].strip()
+    date = msg.get("date", int(time.time()))
 
     # Владелец — тот, кто первым написал /start. Остальных бот игнорирует.
     if st["owner"] is None and text.startswith("/start"):
@@ -111,11 +169,13 @@ def handle(st, msg, heroes):
         send(chat, "Привет! Настрой меня:\n"
                    "/link <ID> — твой ID с opendota.com\n"
                    "/mmr <число> — сверить рейтинг с реальным\n"
-                   "/d <число> — точное изменение MMR за последнюю игру\n"
                    "/behavior <число> — текущая порядочность\n"
-                   "/last — последняя игра\n/5days — статистика за 5 дней\n"
-                   "/stats — общая статистика\n\n"
-                   "Я проверяю матчи примерно раз в 10 минут.")
+                   "/last — последняя игра\n"
+                   "/5days — статистика за 5 дней\n"
+                   "/stats — общая статистика\n"
+                   "/d <число> — точный MMR последней игры (если не нажал кнопку)\n"
+                   "/reset — обнулить статистику\n\n"
+                   "Под каждым отчётом будут кнопки — нажми, сколько MMR реально дали.")
     elif cmd == "/link":
         if not arg.isdigit():
             return send(chat, "Использование: /link 123456789")
@@ -124,35 +184,21 @@ def handle(st, msg, heroes):
         except Exception:
             return send(chat, "Не удалось получить данные. Проверь ID и открытость данных матчей в Dota 2.")
         st["account_id"] = int(arg)
-        st["last_match_id"] = ms[0]["match_id"] if ms else 0
-        send(chat, "Аккаунт привязан ✅ Отчёты придут после следующей игры.")
+        st["last_match_id"] = max((m["match_id"] for m in ms), default=0)
+        st["since"] = date
+        send(chat, "Аккаунт привязан ✅ Отчёты придут по играм, которые закончатся с этого момента.")
     elif cmd == "/mmr":
         if not arg.isdigit():
             return send(chat, "Использование: /mmr 3500")
         old, new = st["mmr"], int(arg)
         st["mmr"] = new
+        st["mmr_at"] = date
         if old is None or old == new:
             send(chat, f"MMR установлен: {new}")
         else:
             diff = new - old
-            # поправка попадает в статистику, чтобы сумма за 5 дней совпала с реальностью
-            st["history"].append({"t": int(time.time()), "win": None, "d": diff, "adj": True})
-            send(chat, f"MMR сверен: бот считал {old}, по факту {new} "
-                       f"(поправка {'+' if diff > 0 else ''}{diff}). Статистика обновлена.")
-    elif cmd == "/d":
-        digits = arg.lstrip("+-")
-        if not digits.isdigit():
-            return send(chat, "Использование: /d 27 — сколько MMR дали или забрали за последнюю игру")
-        last = next((g for g in reversed(st["history"]) if g.get("r")), None)
-        if last is None:
-            return send(chat, "Нет рейтинговой игры, которую можно исправить.")
-        exact = int(digits) if last["win"] else -int(digits)
-        diff = exact - last["d"]
-        last["d"] = exact
-        if st["mmr"] is not None:
-            st["mmr"] += diff
-        send(chat, f"Последняя игра исправлена: {'+' if exact > 0 else ''}{exact} MMR. "
-                   f"Текущий MMR: {st['mmr'] if st['mmr'] is not None else '—'}")
+            st["history"].append({"t": date, "win": None, "d": diff, "adj": True})
+            send(chat, f"MMR сверен: бот считал {old}, по факту {new} (поправка {sg(diff)}).")
     elif cmd == "/behavior":
         if not arg.isdigit():
             return send(chat, "Использование: /behavior 9800")
@@ -162,8 +208,17 @@ def handle(st, msg, heroes):
         if old is None:
             send(chat, f"Порядочность сохранена: {new}")
         else:
-            d = new - old
-            send(chat, f"Порядочность: {old} → {new} ({'+' if d >= 0 else ''}{d})")
+            send(chat, f"Порядочность: {old} → {new} ({sg(new - old)})")
+    elif cmd == "/d":
+        digits = arg.lstrip("+-")
+        if not digits.isdigit():
+            return send(chat, "Использование: /d 27")
+        idx = next((i for i in range(len(st["history"]) - 1, -1, -1) if st["history"][i].get("r")), None)
+        if idx is None:
+            return send(chat, "Нет рейтинговой игры, которую можно исправить.")
+        g, exact = apply_exact(st, idx, int(digits))
+        send(chat, f"Последняя игра исправлена: {sg(exact)} MMR. "
+                   f"Текущий MMR: {st['mmr'] if st['mmr'] is not None else '—'}")
     elif cmd in ("/5days", "/week"):
         send(chat, period_stats(st))
     elif cmd == "/stats":
@@ -180,32 +235,91 @@ def handle(st, msg, heroes):
         if not ms:
             return send(chat, "Матчей не найдено.")
         mmr_line = f"MMR: {st['mmr']}" if st["mmr"] is not None else "MMR: не задан (/mmr)"
-        send(chat, report(ms[0], heroes, mmr_line, beh_text(st)))
+        send(chat, report(ms[0], mmr_line, beh_text(st)))
+    elif cmd == "/reset":
+        st["history"] = []
+        st["total_games"] = st["wins"] = st["games_since_check"] = 0
+        st["mmr"] = st["behavior"] = None
+        st["since"] = st["mmr_at"] = date
+        if st["account_id"]:
+            try:
+                ms = od(f"/players/{st['account_id']}/recentMatches")
+                st["last_match_id"] = max((m["match_id"] for m in ms), default=0)
+            except Exception:
+                pass
+        send(chat, "Всё обнулено ✅ Теперь отправь актуальные /mmr и /behavior.")
 
 
-def check_matches(st, heroes):
+# ---------- нажатия кнопок ----------
+def handle_callback(st, cq):
+    msg = cq.get("message") or {}
+    chat = msg.get("chat", {}).get("id")
+
+    def answer(text):
+        try:
+            tg("answerCallbackQuery", callback_query_id=cq["id"], text=text)
+        except Exception:
+            pass  # слишком старый запрос — не страшно
+
+    if chat is None or chat != st["owner"]:
+        return answer("Нет доступа")
+    parts = (cq.get("data") or "").split(":")
+    if len(parts) != 3 or parts[0] != "d":
+        return answer("")
+    match_id, mag = int(parts[1]), int(parts[2])
+    idx = next((i for i, g in enumerate(st["history"]) if g.get("id") == match_id), None)
+    if idx is None:
+        return answer("Игра уже не найдена в истории")
+
+    g, exact = apply_exact(st, idx, mag)
+    answer(f"Записано: {sg(exact)} MMR")
+
+    lines = msg.get("text", "").split("\n")
+    lines = [f"MMR: {g['m']} ({sg(exact)} ✅)" if ln.startswith("MMR:") else ln for ln in lines]
+    try:
+        tg("editMessageText", chat_id=chat, message_id=msg["message_id"],
+           text="\n".join(lines), disable_web_page_preview=True)
+    except Exception as e:
+        print("edit error:", e)
+
+
+# ---------- новые матчи ----------
+def check_matches(st):
     ms = od(f"/players/{st['account_id']}/recentMatches")
     new = sorted((m for m in ms if m["match_id"] > st["last_match_id"]), key=lambda m: m["match_id"])
     for m in new:
+        st["last_match_id"] = m["match_id"]
+        end = m["start_time"] + m["duration"]
+        if end <= st["since"]:
+            continue  # игра закончилась до привязки — не учитываем
+
         win = is_win(m)
+        ranked = m["lobby_type"] == RANKED_LOBBY
         delta = 0
-        if m["lobby_type"] == RANKED_LOBBY and st["mmr"] is not None:
+        markup = None
+        if st["mmr"] is None:
+            mmr_line = "MMR: не задан (/mmr)"
+        elif ranked and end > st["mmr_at"]:
             delta = MMR_STEP if win else -MMR_STEP
             st["mmr"] += delta
-            mmr_line = f"MMR: {st['mmr']} ({'+' if delta > 0 else ''}{delta}, примерно; точнее: /d число)"
-        elif st["mmr"] is not None:
-            mmr_line = f"MMR: {st['mmr']} (нерейтинговая игра)"
+            mmr_line = f"MMR: {st['mmr']} ({sg(delta)}, примерно — нажми точное значение ⬇️)"
+            markup = keyboard(m["match_id"], win)
+        elif ranked:
+            mmr_line = f"MMR: {st['mmr']} (игра закончилась до ввода рейтинга)"
         else:
-            mmr_line = "MMR: не задан (/mmr)"
+            mmr_line = f"MMR: {st['mmr']} (нерейтинговая игра)"
 
-        st["last_match_id"] = m["match_id"]
         st["total_games"] += 1
         st["wins"] += int(win)
         st["games_since_check"] += 1
-        st["history"].append({"t": m.get("start_time", int(time.time())), "win": win, "d": delta, "r": delta != 0})
+        entry = {"id": m["match_id"], "t": m["start_time"], "win": win, "d": delta, "r": delta != 0}
+        if delta != 0:
+            entry["m"] = st["mmr"]
+        st["history"].append(entry)
         cutoff = time.time() - 30 * 86400
         st["history"] = [g for g in st["history"] if g["t"] >= cutoff]
-        send(st["owner"], report(m, heroes, mmr_line, beh_text(st)))
+
+        send(st["owner"], report(m, mmr_line, beh_text(st)), markup)
 
         if st["games_since_check"] >= BEHAVIOR_EVERY:
             send(st["owner"], f"🔔 Сыграно {BEHAVIOR_EVERY} игр. Зайди в Dota 2, посмотри "
@@ -217,20 +331,20 @@ def main():
     st = load()
     before = json.dumps(st, sort_keys=True)
     try:
-        try:
-            heroes = {h["id"]: h["localized_name"] for h in od("/heroes")}
-        except Exception:
-            heroes = {}
         for u in tg("getUpdates", offset=st["offset"], timeout=0)["result"]:
             st["offset"] = u["update_id"] + 1
-            msg = u.get("message")
-            if msg and "text" in msg:
-                try:
-                    handle(st, msg, heroes)
-                except Exception as e:
-                    print("command error:", e)
+            try:
+                if u.get("message") and "text" in u["message"]:
+                    handle_message(st, u["message"])
+                elif u.get("callback_query"):
+                    handle_callback(st, u["callback_query"])
+            except Exception as e:
+                print("update error:", e)
         if st["owner"] and st["account_id"]:
-            check_matches(st, heroes)
+            try:
+                check_matches(st)
+            except Exception as e:
+                print("matches error:", e)
     finally:
         if json.dumps(st, sort_keys=True) != before or not os.path.exists(STATE_FILE):
             with open(STATE_FILE, "w", encoding="utf-8") as f:
