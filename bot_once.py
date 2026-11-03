@@ -23,6 +23,26 @@ DEFAULT = {
     "wins": 0, "offset": 0, "history": [],
     "since": 0,    # игры, закончившиеся до этого времени, игнорируются
     "mmr_at": 0,   # MMR меняется только по играм, закончившимся после этого времени
+    "pending": None,  # бот ждёт число после нажатия кнопки меню (mmr / behavior / link)
+}
+
+# Постоянная панель кнопок под полем ввода
+MENU = {
+    "keyboard": [
+        ["🎮 Последняя игра", "📊 За 5 дней"],
+        ["📈 Вся статистика", "🔄 Сверить MMR"],
+        ["🧠 Порядочность", "❓ Помощь"],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+LABELS = {
+    "🎮 Последняя игра": "/last",
+    "📊 За 5 дней": "/5days",
+    "📈 Вся статистика": "/stats",
+    "🔄 Сверить MMR": "/mmr",
+    "🧠 Порядочность": "/behavior",
+    "❓ Помощь": "/start",
 }
 
 
@@ -42,8 +62,7 @@ def tg(method, **params):
 
 def send(chat, text, markup=None):
     p = {"chat_id": chat, "text": text, "disable_web_page_preview": True}
-    if markup:
-        p["reply_markup"] = markup
+    p["reply_markup"] = markup or MENU   # у отчётов с рейтингом — кнопки рейтинга, у остальных — меню
     tg("sendMessage", **p)
 
 
@@ -165,24 +184,31 @@ def handle_message(st, msg):
     if chat != st["owner"]:
         return
 
+    text = LABELS.get(text, text)
+    if st["pending"] and text.isdigit():
+        text = f"/{st['pending']} {text}"   # число после кнопки «Сверить MMR» и т. п.
+    st["pending"] = None                    # любое другое сообщение отменяет ожидание
+
     cmd, _, arg = text.partition(" ")
     cmd = cmd.split("@")[0].lower()
     arg = arg.strip()
 
     if cmd == "/start":
-        send(chat, "Привет! Настрой меня:\n"
-                   "/link <ID> — твой ID с opendota.com\n"
-                   "/mmr <число> — сверить рейтинг с реальным\n"
-                   "/behavior <число> — текущая порядочность\n"
-                   "/last — последняя игра\n"
-                   "/5days — статистика за 5 дней\n"
-                   "/stats — общая статистика\n"
-                   "/d <число> — точное изменение MMR последней игры (если нет подходящей кнопки)\n"
-                   "/reset — обнулить статистику\n\n"
-                   "Под каждым рейтинговым отчётом будут кнопки с итоговым рейтингом — нажми свой, и я исправлю сообщение.")
+        send(chat, "Привет! Кнопки меню — внизу, под полем ввода.\n\n"
+                   "Первая настройка:\n"
+                   "1) /link — привяжи аккаунт (ID с opendota.com)\n"
+                   "2) «🔄 Сверить MMR» — введи текущий рейтинг\n"
+                   "3) «🧠 Порядочность» — введи текущую порядочность\n\n"
+                   "Под каждым рейтинговым отчётом будут кнопки с итоговым рейтингом — "
+                   "нажми свой, и я исправлю сообщение.\n\n"
+                   "Ещё: /d <число> — точное изменение MMR последней игры, "
+                   "/reset — обнулить статистику.")
     elif cmd == "/link":
+        if not arg:
+            st["pending"] = "link"
+            return send(chat, "Отправь свой ID — число из адреса профиля на opendota.com/players/…")
         if not arg.isdigit():
-            return send(chat, "Использование: /link 123456789")
+            return send(chat, "Нужно число, например: /link 123456789")
         try:
             ms = od(f"/players/{arg}/recentMatches")
         except Exception:
@@ -192,8 +218,11 @@ def handle_message(st, msg):
         st["since"] = date
         send(chat, "Аккаунт привязан ✅ Отчёты придут по играм, которые закончатся с этого момента.")
     elif cmd == "/mmr":
+        if not arg:
+            st["pending"] = "mmr"
+            return send(chat, "Отправь число — твой текущий рейтинг, например 5655.")
         if not arg.isdigit():
-            return send(chat, "Использование: /mmr 3500")
+            return send(chat, "Нужно число, например: /mmr 5655")
         old, new = st["mmr"], int(arg)
         st["mmr"] = new
         st["mmr_at"] = date
@@ -204,8 +233,11 @@ def handle_message(st, msg):
             st["history"].append({"t": date, "win": None, "d": diff, "adj": True})
             send(chat, f"MMR сверен: бот считал {old}, по факту {new} (поправка {sg(diff)}).")
     elif cmd == "/behavior":
+        if not arg:
+            st["pending"] = "behavior"
+            return send(chat, "Отправь число — твою текущую порядочность, например 9800.")
         if not arg.isdigit():
-            return send(chat, "Использование: /behavior 9800")
+            return send(chat, "Нужно число, например: /behavior 9800")
         old, new = st["behavior"], int(arg)
         st["behavior"] = new
         st["games_since_check"] = 0
