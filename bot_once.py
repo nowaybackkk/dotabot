@@ -23,6 +23,7 @@ DEFAULT = {
     "wins": 0, "offset": 0, "history": [],
     "since": 0,    # игры, закончившиеся до этого времени, игнорируются
     "mmr_at": 0,   # MMR меняется только по играм, закончившимся после этого времени
+    "goal": None,     # желаемый рейтинг (показывается как 5655/6000)
     "pending": None,  # бот ждёт число после нажатия кнопки меню (mmr / behavior / link)
 }
 
@@ -31,7 +32,7 @@ MENU = {
     "keyboard": [
         ["🎮 Последняя игра", "📊 За 5 дней"],
         ["📈 Вся статистика", "🔄 Сверить MMR"],
-        ["🧠 Порядочность", "❓ Помощь"],
+        ["🧠 Порядочность", "🎯 Цель", "❓ Помощь"],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -42,6 +43,7 @@ LABELS = {
     "📈 Вся статистика": "/stats",
     "🔄 Сверить MMR": "/mmr",
     "🧠 Порядочность": "/behavior",
+    "🎯 Цель": "/goal",
     "❓ Помощь": "/start",
 }
 
@@ -99,6 +101,10 @@ def sg(n):
     return f"+{n}" if n > 0 else str(n)
 
 
+def goal_txt(st):
+    return f"/{st['goal']}" if st.get("goal") else ""
+
+
 def is_win(m):
     return (m["player_slot"] < 128) == m["radiant_win"]
 
@@ -114,6 +120,7 @@ def report(m, mmr_line, beh_line):
         f"{'🏆 ПОБЕДА' if is_win(m) else '💀 ПОРАЖЕНИЕ'}\n"
         f"Герой: {hero}\n"
         f"KDA: {m['kills']}/{m['deaths']}/{m['assists']}\n"
+        f"GPM: {m.get('gold_per_min', '—')}\n"
         f"Длительность: {mins}:{secs:02d}\n"
         f"{mmr_line}\n{beh_line}\n"
         f"https://www.opendota.com/matches/{m['match_id']}"
@@ -198,7 +205,8 @@ def handle_message(st, msg):
                    "Первая настройка:\n"
                    "1) /link — привяжи аккаунт (ID с opendota.com)\n"
                    "2) «🔄 Сверить MMR» — введи текущий рейтинг\n"
-                   "3) «🧠 Порядочность» — введи текущую порядочность\n\n"
+                   "3) «🧠 Порядочность» — введи текущую порядочность\n"
+                   "4) «🎯 Цель» — желаемый рейтинг (по желанию)\n\n"
                    "Под каждым рейтинговым отчётом будут кнопки с итоговым рейтингом — "
                    "нажми свой, и я исправлю сообщение.\n\n"
                    "Ещё: /d <число> — точное изменение MMR последней игры, "
@@ -245,6 +253,19 @@ def handle_message(st, msg):
             send(chat, f"Порядочность сохранена: {new}")
         else:
             send(chat, f"Порядочность: {old} → {new} ({sg(new - old)})")
+    elif cmd == "/goal":
+        if not arg:
+            st["pending"] = "goal"
+            return send(chat, "Отправь число — желаемый рейтинг, например 6000. "
+                              "Чтобы убрать цель, отправь 0.")
+        if arg.lower() in ("0", "off", "выкл"):
+            st["goal"] = None
+            return send(chat, "Цель убрана.")
+        if not arg.isdigit():
+            return send(chat, "Нужно число, например: /goal 6000")
+        st["goal"] = int(arg)
+        now = f"Сейчас {st['mmr']}/{st['goal']}." if st["mmr"] is not None else "Задай рейтинг: /mmr"
+        send(chat, f"Цель установлена: {st['goal']}. {now}")
     elif cmd == "/d":
         digits = arg.lstrip("+-")
         if not digits.isdigit():
@@ -261,16 +282,21 @@ def handle_message(st, msg):
         if not st["total_games"]:
             return send(chat, "Пока нет учтённых игр.")
         wr = st["wins"] / st["total_games"] * 100
+        goal_line = ""
+        if st["goal"] and st["mmr"] is not None:
+            left = st["goal"] - st["mmr"]
+            goal_line = (f"\nДо цели {st['goal']}: {left} MMR" if left > 0
+                         else f"\n🎉 Цель {st['goal']} достигнута!")
         send(chat, f"Всего игр: {st['total_games']}\nПобед: {st['wins']} ({wr:.1f}%)\n"
-                   f"MMR: {st['mmr'] if st['mmr'] is not None else '—'}\n{beh_text(st)}\n\n"
-                   + period_stats(st))
+                   f"MMR: {st['mmr'] if st['mmr'] is not None else '—'}{goal_txt(st)}{goal_line}\n"
+                   f"{beh_text(st)}\n\n" + period_stats(st))
     elif cmd == "/last":
         if not st["account_id"]:
             return send(chat, "Сначала привяжи аккаунт: /link <ID>")
         ms = od(f"/players/{st['account_id']}/recentMatches")
         if not ms:
             return send(chat, "Матчей не найдено.")
-        mmr_line = f"MMR: {st['mmr']}" if st["mmr"] is not None else "MMR: не задан (/mmr)"
+        mmr_line = f"MMR: {st['mmr']}{goal_txt(st)}" if st["mmr"] is not None else "MMR: не задан (/mmr)"
         send(chat, report(ms[0], mmr_line, beh_text(st)))
     elif cmd == "/reset":
         st["history"] = []
@@ -321,8 +347,8 @@ def handle_callback(st, cq):
     answer(f"Записано: {sg(exact)} MMR")
 
     lines = msg.get("text", "").split("\n")
-    new_line = (f"MMR: {g['b']} → {g['m']} ({sg(exact)} ✅)" if "b" in g
-                else f"MMR: {g['m']} ({sg(exact)} ✅)")
+    new_line = (f"MMR: {g['b']} → {g['m']}{goal_txt(st)} ({sg(exact)} ✅)" if "b" in g
+                else f"MMR: {g['m']}{goal_txt(st)} ({sg(exact)} ✅)")
     lines = [new_line if ln.startswith("MMR:") else ln for ln in lines]
     try:
         tg("editMessageText", chat_id=chat, message_id=msg["message_id"],
@@ -351,12 +377,12 @@ def check_matches(st):
             before = st["mmr"]
             delta = MMR_STEP if win else -MMR_STEP
             st["mmr"] += delta
-            mmr_line = f"MMR: {before} → ≈{st['mmr']} (выбери точный итог ⬇️)"
+            mmr_line = f"MMR: {before} → ≈{st['mmr']}{goal_txt(st)} (выбери точный итог ⬇️)"
             markup = keyboard(m["match_id"], win, before)
         elif ranked:
-            mmr_line = f"MMR: {st['mmr']} (игра закончилась до ввода рейтинга)"
+            mmr_line = f"MMR: {st['mmr']}{goal_txt(st)} (игра закончилась до ввода рейтинга)"
         else:
-            mmr_line = f"MMR: {st['mmr']} (нерейтинговая игра)"
+            mmr_line = f"MMR: {st['mmr']}{goal_txt(st)} (нерейтинговая игра)"
 
         st["total_games"] += 1
         st["wins"] += int(win)
