@@ -3,11 +3,11 @@
  "account_id": 190242643,
  "mmr": 5580,
  "behavior": 3907,
- "last_match_id": 9074891833,
- "games_since_check": 6,
- "total_games": 21,
- "wins": 9,
- "offset": 333341489,
+ "last_match_id": 9074974935,
+ "games_since_check": 7,
+ "total_games": 22,
+ "wins": 10,
+ "offset": 333341492,
  "history": [
   {
    "t": 1793382805,
@@ -131,6 +131,12 @@
   },
   {
    "t": 1793729370,
+   "win": true,
+   "d": 0,
+   "r": false
+  },
+  {
+   "t": 1793732795,
    "win": true,
    "d": 0,
    "r": false
