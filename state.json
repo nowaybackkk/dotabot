@@ -1,12 +1,12 @@
 {
  "owner": 613862256,
- "account_id": null,
- "mmr": null,
- "behavior": null,
+ "account_id": 190242643,
+ "mmr": 5655,
+ "behavior": 3907,
  "last_match_id": 0,
  "games_since_check": 0,
  "total_games": 0,
  "wins": 0,
- "offset": 333341472,
+ "offset": 333341475,
  "history": []
 }
