@@ -7,7 +7,7 @@
  "games_since_check": 8,
  "total_games": 23,
  "wins": 10,
- "offset": 333341503,
+ "offset": 333341504,
  "history": [
   {
    "t": 1793382805,
@@ -151,5 +151,5 @@
  "since": 0,
  "mmr_at": 0,
  "goal": null,
- "pending": null
+ "pending": "goal"
 }
