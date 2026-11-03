@@ -3,8 +3,10 @@ Dota 2 -> Telegram бот для запуска по расписанию (GitHu
 Каждый запуск: читает команды и нажатия кнопок, проверяет новые матчи,
 шлёт отчёты, сохраняет state.json. Только стандартная библиотека Python.
 """
+import html
 import json
 import os
+import re
 import time
 import urllib.request
 
@@ -47,6 +49,14 @@ LABELS = {
     "❓ Помощь": "/start",
 }
 
+DIV = "━━━━━━━━━━━━━━"
+MODES = {
+    1: "All Pick", 2: "Captains Mode", 3: "Random Draft", 4: "Single Draft",
+    5: "All Random", 8: "Reverse CM", 12: "Least Played", 16: "Captains Draft",
+    17: "Balanced Draft", 18: "Ability Draft", 20: "ARDM", 21: "1v1 Mid",
+    22: "All Draft", 23: "Turbo", 24: "Mutation",
+}
+
 
 # ---------- сеть ----------
 def http(url, data=None):
@@ -62,8 +72,28 @@ def tg(method, **params):
     return http(f"https://api.telegram.org/bot{TOKEN}/{method}", params)
 
 
-def send(chat, text, markup=None):
+def to_html(text, match_id=None):
+    """Простой текст -> HTML: жирные заголовки и подписи, ссылка на матч."""
+    out = []
+    for i, ln in enumerate(text.split("\n")):
+        e = html.escape(ln, quote=False)
+        if i == 0 or ln.startswith("📊"):
+            e = f"<b>{e}</b>"
+        elif ln.startswith("🔗") and match_id:
+            e = f'🔗 <a href="https://www.opendota.com/matches/{match_id}">Матч на OpenDota</a>'
+        else:
+            m = re.match(r"^(\S+) ([^:]{1,25}:)(.*)$", e)
+            if m:
+                e = f"{m.group(1)} <b>{m.group(2)}</b>{m.group(3)}"
+        out.append(e)
+    return "\n".join(out)
+
+
+def send(chat, text, markup=None, fancy=False, match_id=None):
     p = {"chat_id": chat, "text": text, "disable_web_page_preview": True}
+    if fancy:
+        p["text"] = to_html(text, match_id)
+        p["parse_mode"] = "HTML"
     p["reply_markup"] = markup or MENU   # у отчётов с рейтингом — кнопки рейтинга, у остальных — меню
     tg("sendMessage", **p)
 
@@ -114,16 +144,23 @@ def beh_text(st):
 
 
 def report(m, mmr_line, beh_line):
+    win = is_win(m)
     hero = heroes().get(m["hero_id"], f"hero {m['hero_id']}")
     mins, secs = divmod(m["duration"], 60)
+    k, d, a = m["kills"], m["deaths"], m["assists"]
+    kda = (k + a) / max(d, 1)
+    mode = MODES.get(m.get("game_mode"), f"режим {m.get('game_mode', '?')}")
+    kind = "Рейтинг" if m.get("lobby_type") == RANKED_LOBBY else "Обычная игра"
     return (
-        f"{'🏆 ПОБЕДА' if is_win(m) else '💀 ПОРАЖЕНИЕ'}\n"
-        f"Герой: {hero}\n"
-        f"KDA: {m['kills']}/{m['deaths']}/{m['assists']}\n"
-        f"GPM: {m.get('gold_per_min', '—')}\n"
-        f"Длительность: {mins}:{secs:02d}\n"
-        f"{mmr_line}\n{beh_line}\n"
-        f"https://www.opendota.com/matches/{m['match_id']}"
+        f"{'🏆 ПОБЕДА' if win else '💀 ПОРАЖЕНИЕ'}\n{DIV}\n"
+        f"🦸 Герой: {hero}\n"
+        f"⚔️ KDA: {k}/{d}/{a} ({kda:.1f})\n"
+        f"💰 GPM: {m.get('gold_per_min', '—')}\n"
+        f"⏱ Длительность: {mins}:{secs:02d}\n"
+        f"🎲 Режим: {mode} · {kind}\n{DIV}\n"
+        f"💎 {mmr_line}\n"
+        f"🧠 {beh_line}\n"
+        f"🔗 Матч на OpenDota"
     )
 
 
@@ -132,16 +169,18 @@ def period_stats(st, days=STATS_DAYS):
     window = [g for g in st["history"] if g["t"] >= since]
     games = [g for g in window if g["win"] is not None]  # поправки MMR — не игры
     if not games:
-        return f"За последние {days} дней игр нет."
+        return f"😴 За последние {days} дней игр нет."
     wins = sum(1 for g in games if g["win"])
     losses = len(games) - wins
     delta = sum(g["d"] for g in window)
     wr = wins / len(games) * 100
     return (
-        f"📊 Статистика за {days} дней\n"
-        f"Игр: {len(games)}\n"
-        f"Победы: {wins} | Поражения: {losses} ({wr:.0f}% побед)\n"
-        f"MMR: {sg(delta)}"
+        f"📊 Статистика за {days} дней\n{DIV}\n"
+        f"🎮 Игр: {len(games)}\n"
+        f"✅ Победы: {wins}\n"
+        f"❌ Поражения: {losses}\n"
+        f"🔥 Винрейт: {wr:.0f}%\n"
+        f"{'🟢' if delta >= 0 else '🔴'} MMR за период: {sg(delta)}"
     )
 
 
@@ -235,7 +274,7 @@ def handle_message(st, msg):
         st["mmr"] = new
         st["mmr_at"] = date
         if old is None or old == new:
-            send(chat, f"MMR установлен: {new}")
+            send(chat, f"💎 MMR установлен: {new}")
         else:
             diff = new - old
             st["history"].append({"t": date, "win": None, "d": diff, "adj": True})
@@ -250,7 +289,7 @@ def handle_message(st, msg):
         st["behavior"] = new
         st["games_since_check"] = 0
         if old is None:
-            send(chat, f"Порядочность сохранена: {new}")
+            send(chat, f"🧠 Порядочность сохранена: {new}")
         else:
             send(chat, f"Порядочность: {old} → {new} ({sg(new - old)})")
     elif cmd == "/goal":
@@ -265,7 +304,7 @@ def handle_message(st, msg):
             return send(chat, "Нужно число, например: /goal 6000")
         st["goal"] = int(arg)
         now = f"Сейчас {st['mmr']}/{st['goal']}." if st["mmr"] is not None else "Задай рейтинг: /mmr"
-        send(chat, f"Цель установлена: {st['goal']}. {now}")
+        send(chat, f"🎯 Цель установлена: {st['goal']}. {now}")
     elif cmd == "/d":
         digits = arg.lstrip("+-")
         if not digits.isdigit():
@@ -277,7 +316,7 @@ def handle_message(st, msg):
         send(chat, f"Последняя игра исправлена: {sg(exact)} MMR. "
                    f"Текущий MMR: {st['mmr'] if st['mmr'] is not None else '—'}")
     elif cmd in ("/5days", "/week"):
-        send(chat, period_stats(st))
+        send(chat, period_stats(st), fancy=True)
     elif cmd == "/stats":
         if not st["total_games"]:
             return send(chat, "Пока нет учтённых игр.")
@@ -285,11 +324,13 @@ def handle_message(st, msg):
         goal_line = ""
         if st["goal"] and st["mmr"] is not None:
             left = st["goal"] - st["mmr"]
-            goal_line = (f"\nДо цели {st['goal']}: {left} MMR" if left > 0
+            goal_line = (f"\n🎯 До цели {st['goal']}: {left} MMR" if left > 0
                          else f"\n🎉 Цель {st['goal']} достигнута!")
-        send(chat, f"Всего игр: {st['total_games']}\nПобед: {st['wins']} ({wr:.1f}%)\n"
-                   f"MMR: {st['mmr'] if st['mmr'] is not None else '—'}{goal_txt(st)}{goal_line}\n"
-                   f"{beh_text(st)}\n\n" + period_stats(st))
+        send(chat, f"📈 Общая статистика\n{DIV}\n"
+                   f"🎮 Всего игр: {st['total_games']}\n"
+                   f"🏆 Побед: {st['wins']} ({wr:.1f}%)\n"
+                   f"💎 MMR: {st['mmr'] if st['mmr'] is not None else '—'}{goal_txt(st)}{goal_line}\n"
+                   f"🧠 {beh_text(st)}\n\n" + period_stats(st), fancy=True)
     elif cmd == "/last":
         if not st["account_id"]:
             return send(chat, "Сначала привяжи аккаунт: /link <ID>")
@@ -297,7 +338,7 @@ def handle_message(st, msg):
         if not ms:
             return send(chat, "Матчей не найдено.")
         mmr_line = f"MMR: {st['mmr']}{goal_txt(st)}" if st["mmr"] is not None else "MMR: не задан (/mmr)"
-        send(chat, report(ms[0], mmr_line, beh_text(st)))
+        send(chat, report(ms[0], mmr_line, beh_text(st)), fancy=True, match_id=ms[0]["match_id"])
     elif cmd == "/reset":
         st["history"] = []
         st["total_games"] = st["wins"] = st["games_since_check"] = 0
@@ -347,12 +388,14 @@ def handle_callback(st, cq):
     answer(f"Записано: {sg(exact)} MMR")
 
     lines = msg.get("text", "").split("\n")
-    new_line = (f"MMR: {g['b']} → {g['m']}{goal_txt(st)} ({sg(exact)} ✅)" if "b" in g
-                else f"MMR: {g['m']}{goal_txt(st)} ({sg(exact)} ✅)")
-    lines = [new_line if ln.startswith("MMR:") else ln for ln in lines]
+    mark = "🟢" if exact > 0 else "🔴"
+    new_line = (f"💎 MMR: {g['b']} → {g['m']}{goal_txt(st)} ({mark} {sg(exact)})" if "b" in g
+                else f"💎 MMR: {g['m']}{goal_txt(st)} ({mark} {sg(exact)})")
+    lines = [new_line if ln.startswith("💎 MMR:") else ln for ln in lines]
     try:
         tg("editMessageText", chat_id=chat, message_id=msg["message_id"],
-           text="\n".join(lines), disable_web_page_preview=True)
+           text=to_html("\n".join(lines), match_id), parse_mode="HTML",
+           disable_web_page_preview=True)
     except Exception as e:
         print("edit error:", e)
 
@@ -395,7 +438,7 @@ def check_matches(st):
         cutoff = time.time() - 30 * 86400
         st["history"] = [g for g in st["history"] if g["t"] >= cutoff]
 
-        send(st["owner"], report(m, mmr_line, beh_text(st)), markup)
+        send(st["owner"], report(m, mmr_line, beh_text(st)), markup, fancy=True, match_id=m["match_id"])
 
         if st["games_since_check"] >= BEHAVIOR_EVERY:
             send(st["owner"], f"🔔 Сыграно {BEHAVIOR_EVERY} игр. Зайди в Dota 2, посмотри "
