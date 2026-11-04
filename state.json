@@ -7,12 +7,14 @@
  "games_since_check": 0,
  "total_games": 0,
  "wins": 0,
- "offset": 333341519,
+ "offset": 333341520,
  "history": [],
  "since": 0,
  "mmr_at": 0,
  "goal": 6000,
- "friends": [],
+ "friends": [
+  204862419
+ ],
  "verdicts": [],
  "pending": null
 }
