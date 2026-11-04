@@ -27,6 +27,7 @@ DEFAULT = {
     "mmr_at": 0,   # MMR меняется только по играм, закончившимся после этого времени
     "goal": None,     # желаемый рейтинг (показывается как 5655/6000)
     "friends": [],    # ID друзей для вкладки «С друзьями» (необязательно)
+    "verdicts": [],   # матчи, для которых вердикт ещё не готов (OpenDota не обработал игру)
     "pending": None,  # бот ждёт число после нажатия кнопки меню (mmr / behavior / link)
 }
 
@@ -94,13 +95,19 @@ def to_html(text, match_id=None):
     return "\n".join(out)
 
 
-def send(chat, text, markup=None, fancy=False, match_id=None):
+def send(chat, text, markup=None, fancy=False, match_id=None, reply_to=None):
     p = {"chat_id": chat, "text": text, "disable_web_page_preview": True}
+    if reply_to:
+        p["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
     if fancy:
         p["text"] = to_html(text, match_id)
         p["parse_mode"] = "HTML"
     p["reply_markup"] = markup or MENU   # у отчётов с рейтингом — кнопки рейтинга, у остальных — меню
-    tg("sendMessage", **p)
+    res = tg("sendMessage", **p)
+    try:
+        return res["result"]["message_id"]
+    except (KeyError, TypeError):
+        return None
 
 
 def od(path):
@@ -130,6 +137,7 @@ def load():
         st = dict(DEFAULT)
     st["history"] = list(st["history"])
     st["friends"] = list(st["friends"])
+    st["verdicts"] = list(st["verdicts"])
     return st
 
 
@@ -588,13 +596,44 @@ def check_matches(st):
             cutoff = time.time() - 30 * 86400
             st["history"] = [g for g in st["history"] if g["t"] >= cutoff]
 
-        send(st["owner"], report(m, mmr_line, beh_text(st), safe_analyze(m)), markup,
-             fancy=True, match_id=m["match_id"])
+        analysis = safe_analyze(m)
+        msg_id = send(st["owner"], report(m, mmr_line, beh_text(st), analysis), markup,
+                      fancy=True, match_id=m["match_id"])
+        if analysis is None and msg_id:   # OpenDota ещё не обработал матч — доделаем позже
+            st["verdicts"].append({"mid": m["match_id"], "msg": msg_id, "tries": 0,
+                                   "ps": m["player_slot"], "rw": m["radiant_win"], "dur": m["duration"]})
 
         if st["games_since_check"] >= BEHAVIOR_EVERY:
             send(st["owner"], f"🔔 Сыграно {BEHAVIOR_EVERY} игр. Зайди в Dota 2, посмотри "
                               "порядочность и отправь: /behavior <число>")
             st["games_since_check"] = 0
+
+
+def retry_verdicts(st):
+    """Пробуем досчитать вердикт для игр, которые OpenDota не успел обработать."""
+    left = []
+    for v in st["verdicts"]:
+        m = {"match_id": v["mid"], "player_slot": v["ps"], "radiant_win": v["rw"], "duration": v["dur"]}
+        res = safe_analyze(m)
+        if res:
+            txt = f"🔎 Анализ матча готов\n{DIV}\n⚖️ Вердикт по цифрам: {res[0]}\n"
+            if res[1]:
+                txt += f"📝 Почему: {res[1]}\n"
+            txt += "🔗 Матч на OpenDota"
+            send(st["owner"], txt, fancy=True, match_id=v["mid"], reply_to=v["msg"])
+        else:
+            v["tries"] += 1
+            if v["tries"] < 8:      # примерно 15 минут попыток, потом бросаем
+                left.append(v)
+    st["verdicts"] = left
+
+
+def matches_due():
+    """Матчи проверяем на каждом втором запуске (экономим лимит OpenDota), а команды и кнопки — на каждом."""
+    try:
+        return int(os.environ.get("GITHUB_RUN_NUMBER", "0")) % 2 == 0
+    except ValueError:
+        return True
 
 
 def main():
@@ -610,11 +649,16 @@ def main():
                     handle_callback(st, u["callback_query"])
             except Exception as e:
                 print("update error:", e)
-        if st["owner"] and st["account_id"]:
+        if st["owner"] and st["account_id"] and matches_due():
             try:
                 check_matches(st)
             except Exception as e:
                 print("matches error:", e)
+            if st["verdicts"]:
+                try:
+                    retry_verdicts(st)
+                except Exception as e:
+                    print("verdict error:", e)
     finally:
         if json.dumps(st, sort_keys=True) != before or not os.path.exists(STATE_FILE):
             with open(STATE_FILE, "w", encoding="utf-8") as f:
