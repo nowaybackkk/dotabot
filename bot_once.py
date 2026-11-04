@@ -83,7 +83,7 @@ def to_html(text, match_id=None):
     out = []
     for i, ln in enumerate(text.split("\n")):
         e = html.escape(ln, quote=False)
-        if i == 0 or ln.startswith("📊"):
+        if i == 0 or ln.startswith("📊 Рейтинг за"):
             e = f"<b>{e}</b>"
         elif ln.startswith("🔗") and match_id:
             e = f'🔗 <a href="https://www.opendota.com/matches/{match_id}">Матч на OpenDota</a>'
@@ -376,16 +376,28 @@ def handle_message(st, msg):
     arg = arg.strip()
 
     if cmd == "/start":
-        send(chat, "Привет! Кнопки меню — внизу, под полем ввода.\n\n"
-                   "Первая настройка:\n"
-                   "1) /link — привяжи аккаунт (ID с opendota.com)\n"
-                   "2) «🔄 Сверить MMR» — введи текущий рейтинг\n"
-                   "3) «🧠 Порядочность» — введи текущую порядочность\n"
-                   "4) «🎯 Цель» — желаемый рейтинг (по желанию)\n\n"
-                   "Под каждым рейтинговым отчётом будут кнопки с итоговым рейтингом — "
-                   "нажми свой, и я исправлю сообщение.\n\n"
-                   "Ещё: /d <число> — точное изменение MMR последней игры, "
-                   "/reset — обнулить статистику, /friend <ID> — добавить или убрать друга.")
+        send(chat,
+             "👋 Dota-бот: отчёт после каждой игры\n\n"
+             "⚙️ Настройка (один раз):\n"
+             "1️⃣ Отправь /link и свой ID — это число из адреса твоего профиля на opendota.com\n"
+             "2️⃣ Нажми «🔄 Сверить MMR» и отправь свой текущий рейтинг\n"
+             "3️⃣ Нажми «🧠 Порядочность» и отправь значение из игры\n"
+             "4️⃣ «🎯 Цель» — по желанию, например 6000\n\n"
+             "📨 После игры:\n"
+             "Я пришлю результат, героя, KDA, GPM и вердикт. "
+             "Под рейтинговой игрой появятся кнопки с числами — нажми тот рейтинг, "
+             "который у тебя стал в игре, и я сам посчитаю, сколько дали или забрали.\n\n"
+             "📋 Кнопки меню:\n"
+             "🎮 Последняя игра — отчёт по последнему матчу\n"
+             "📊 За 5 дней — победы, поражения и MMR за 5 дней\n"
+             "📈 Вся статистика — общий итог и сколько осталось до цели\n"
+             "👥 С друзьями — винрейт с напарниками\n"
+             "🔄 Сверить MMR — поправить рейтинг, если он разошёлся с игрой\n"
+             "🧠 Порядочность — записать новое значение\n"
+             "🎯 Цель — желаемый рейтинг\n\n"
+             "ℹ️ В статистику идут только рейтинговые игры.\n"
+             "Ещё: /friend ID — добавить или убрать друга, /reset — обнулить статистику.",
+             fancy=True)
     elif cmd == "/link":
         if not arg:
             st["pending"] = "link"
@@ -461,16 +473,6 @@ def handle_message(st, msg):
         st["goal"] = int(arg)
         now = f"Сейчас {st['mmr']}/{st['goal']}." if st["mmr"] is not None else "Задай рейтинг: /mmr"
         send(chat, f"🎯 Цель установлена: {st['goal']}. {now}")
-    elif cmd == "/d":
-        digits = arg.lstrip("+-")
-        if not digits.isdigit():
-            return send(chat, "Использование: /d 27")
-        idx = next((i for i in range(len(st["history"]) - 1, -1, -1) if st["history"][i].get("r")), None)
-        if idx is None:
-            return send(chat, "Нет рейтинговой игры, которую можно исправить.")
-        g, exact = apply_exact(st, idx, int(digits))
-        send(chat, f"Последняя игра исправлена: {sg(exact)} MMR. "
-                   f"Текущий MMR: {st['mmr'] if st['mmr'] is not None else '—'}")
     elif cmd in ("/5days", "/week"):
         send(chat, period_stats(st), fancy=True)
     elif cmd == "/stats":
@@ -534,7 +536,7 @@ def handle_callback(st, cq):
     g = st["history"][idx]
     if parts[0] == "a":   # нажат итоговый рейтинг
         if "b" not in g:
-            return answer("Для этой игры используй /d")
+            return answer("Для этой игры нажми «Сверить MMR» в меню")
         change = value - g["b"]
         if (g["win"] and change <= 0) or (not g["win"] and change >= 0):
             return answer("Не сходится с рейтингом до игры. Сверь рейтинг: /mmr")
