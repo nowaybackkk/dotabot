@@ -2,8 +2,8 @@ name: dota-bot
 
 on:
   schedule:
-    - cron: "*/1 * * * *"   # каждые 10 минут
-  workflow_dispatch:          # ручной запуск кнопкой
+    - cron: "*/10 * * * *"   # запасной запуск на случай, если внешний будильник остановится
+  workflow_dispatch:          # запуск вручную и из cron-job.org
 
 concurrency: dota-bot
 
@@ -13,13 +13,11 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Run bot
-        run: python bot_once.py
+        run: python3 bot_once.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       - name: Save state
