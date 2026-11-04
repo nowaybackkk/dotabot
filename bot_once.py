@@ -26,6 +26,7 @@ DEFAULT = {
     "since": 0,    # игры, закончившиеся до этого времени, игнорируются
     "mmr_at": 0,   # MMR меняется только по играм, закончившимся после этого времени
     "goal": None,     # желаемый рейтинг (показывается как 5655/6000)
+    "friends": [],    # ID друзей для вкладки «С друзьями» (необязательно)
     "pending": None,  # бот ждёт число после нажатия кнопки меню (mmr / behavior / link)
 }
 
@@ -33,8 +34,9 @@ DEFAULT = {
 MENU = {
     "keyboard": [
         ["🎮 Последняя игра", "📊 За 5 дней"],
-        ["📈 Вся статистика", "🔄 Сверить MMR"],
-        ["🧠 Порядочность", "🎯 Цель", "❓ Помощь"],
+        ["📈 Вся статистика", "👥 С друзьями"],
+        ["🔄 Сверить MMR", "🧠 Порядочность"],
+        ["🎯 Цель", "❓ Помощь"],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -43,6 +45,7 @@ LABELS = {
     "🎮 Последняя игра": "/last",
     "📊 За 5 дней": "/5days",
     "📈 Вся статистика": "/stats",
+    "👥 С друзьями": "/friends",
     "🔄 Сверить MMR": "/mmr",
     "🧠 Порядочность": "/behavior",
     "🎯 Цель": "/goal",
@@ -50,6 +53,8 @@ LABELS = {
 }
 
 DIV = "━━━━━━━━━━━━━━"
+FRIEND_DAYS = 90          # за сколько дней считать винрейт с друзьями
+MIN_FRIEND_GAMES = 5      # без списка друзей показываем тех, с кем сыграно не меньше стольких игр
 MODES = {
     1: "All Pick", 2: "Captains Mode", 3: "Random Draft", 4: "Single Draft",
     5: "All Random", 8: "Reverse CM", 12: "Least Played", 16: "Captains Draft",
@@ -124,6 +129,7 @@ def load():
     except FileNotFoundError:
         st = dict(DEFAULT)
     st["history"] = list(st["history"])
+    st["friends"] = list(st["friends"])
     return st
 
 
@@ -247,19 +253,63 @@ def period_stats(st, days=STATS_DAYS):
     window = [g for g in st["history"] if g["t"] >= since]
     games = [g for g in window if g["win"] is not None]  # поправки MMR — не игры
     if not games:
-        return f"😴 За последние {days} дней игр нет."
+        return f"😴 За последние {days} дней рейтинговых игр нет."
     wins = sum(1 for g in games if g["win"])
     losses = len(games) - wins
     delta = sum(g["d"] for g in window)
     wr = wins / len(games) * 100
     return (
-        f"📊 Статистика за {days} дней\n{DIV}\n"
+        f"📊 Рейтинг за {days} дней\n{DIV}\n"
         f"🎮 Игр: {len(games)}\n"
         f"✅ Победы: {wins}\n"
         f"❌ Поражения: {losses}\n"
         f"🔥 Винрейт: {wr:.0f}%\n"
         f"{'🟢' if delta >= 0 else '🔴'} MMR за период: {sg(delta)}"
     )
+
+
+def games_word(n):
+    if n % 10 == 1 and n % 100 != 11:
+        return "игра"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "игры"
+    return "игр"
+
+
+def friends_report(st):
+    """Винрейт в рейтинге вместе с напарниками (данные OpenDota, только рейтинговые игры)."""
+    q = f"lobby_type={RANKED_LOBBY}&date={FRIEND_DAYS}"
+    peers = od(f"/players/{st['account_id']}/peers?{q}")
+    wl = od(f"/players/{st['account_id']}/wl?{q}")
+
+    if st["friends"]:
+        by_id = {p["account_id"]: p for p in peers}
+        rows = [by_id.get(fid) or {"account_id": fid, "with_games": 0, "with_win": 0} for fid in st["friends"]]
+    else:
+        rows = [p for p in peers if p.get("with_games", 0) >= MIN_FRIEND_GAMES]
+    rows.sort(key=lambda p: -p.get("with_games", 0))
+
+    total = wl.get("win", 0) + wl.get("lose", 0)
+    lines = [f"👥 Винрейт с друзьями", DIV, f"📅 Рейтинг, последние {FRIEND_DAYS} дней"]
+    if total:
+        lines.append(f"🎮 Всего в рейтинге: {total} {games_word(total)} · {wl['win'] / total:.0%}")
+    lines.append(DIV)
+    if not rows:
+        lines.append(f"Не нашёл напарников с {MIN_FRIEND_GAMES}+ играми в рейтинге.")
+        lines.append("Добавь друга вручную: /friend <ID> (ID с opendota.com)")
+        return "\n".join(lines)
+    for p in rows[:10]:
+        n, w = p.get("with_games", 0), p.get("with_win", 0)
+        name = p.get("personaname") or f"ID {p['account_id']}"
+        if n == 0:
+            lines.append(f"⚪ {name}: игр вместе нет")
+            continue
+        rate = w / n
+        mark = "🟢" if rate >= 0.55 else ("🔴" if rate < 0.45 else "🟡")
+        lines.append(f"{mark} {name}: {n} {games_word(n)} · {rate:.0%} ({w}–{n - w})")
+    lines.append(DIV)
+    lines.append("🟢 ≥55%  🟡 45–55%  🔴 <45%  ·  в скобках: победы–поражения")
+    return "\n".join(lines)
 
 
 def keyboard(match_id, win, before):
@@ -327,7 +377,7 @@ def handle_message(st, msg):
                    "Под каждым рейтинговым отчётом будут кнопки с итоговым рейтингом — "
                    "нажми свой, и я исправлю сообщение.\n\n"
                    "Ещё: /d <число> — точное изменение MMR последней игры, "
-                   "/reset — обнулить статистику.")
+                   "/reset — обнулить статистику, /friend <ID> — добавить или убрать друга.")
     elif cmd == "/link":
         if not arg:
             st["pending"] = "link"
@@ -370,6 +420,26 @@ def handle_message(st, msg):
             send(chat, f"🧠 Порядочность сохранена: {new}")
         else:
             send(chat, f"Порядочность: {old} → {new} ({sg(new - old)})")
+    elif cmd == "/friends":
+        if not st["account_id"]:
+            return send(chat, "Сначала привяжи аккаунт: /link <ID>")
+        try:
+            text_f = friends_report(st)
+        except Exception as e:
+            print("friends error:", e)
+            return send(chat, "😕 OpenDota сейчас не отвечает, попробуй чуть позже.")
+        send(chat, text_f, fancy=True)
+    elif cmd == "/friend":
+        if not arg.isdigit():
+            return send(chat, "Отправь ID друга: /friend 123456789 — добавить или убрать из списка.\n"
+                              "Если список пуст, показываю всех, с кем сыграно 5+ рейтинговых игр.")
+        fid = int(arg)
+        if fid in st["friends"]:
+            st["friends"].remove(fid)
+            send(chat, f"🗑 ID {fid} убран из друзей (в списке: {len(st['friends'])}).")
+        else:
+            st["friends"].append(fid)
+            send(chat, f"✅ ID {fid} добавлен в друзья (в списке: {len(st['friends'])}).")
     elif cmd == "/goal":
         if not arg:
             st["pending"] = "goal"
@@ -404,7 +474,7 @@ def handle_message(st, msg):
             left = st["goal"] - st["mmr"]
             goal_line = (f"\n🎯 До цели {st['goal']}: {left} MMR" if left > 0
                          else f"\n🎉 Цель {st['goal']} достигнута!")
-        send(chat, f"📈 Общая статистика\n{DIV}\n"
+        send(chat, f"📈 Статистика рейтинга\n{DIV}\n"
                    f"🎮 Всего игр: {st['total_games']}\n"
                    f"🏆 Побед: {st['wins']} ({wr:.1f}%)\n"
                    f"💎 MMR: {st['mmr'] if st['mmr'] is not None else '—'}{goal_txt(st)}{goal_line}\n"
@@ -504,18 +574,19 @@ def check_matches(st):
         elif ranked:
             mmr_line = f"MMR: {st['mmr']}{goal_txt(st)} (игра закончилась до ввода рейтинга)"
         else:
-            mmr_line = f"MMR: {st['mmr']}{goal_txt(st)} (нерейтинговая игра)"
+            mmr_line = f"MMR: {st['mmr']}{goal_txt(st)} (не рейтинг — в статистику не входит)"
 
-        st["total_games"] += 1
-        st["wins"] += int(win)
-        st["games_since_check"] += 1
-        entry = {"id": m["match_id"], "t": m["start_time"], "win": win, "d": delta, "r": delta != 0}
-        if delta != 0:
-            entry["m"] = st["mmr"]
-            entry["b"] = st["mmr"] - delta
-        st["history"].append(entry)
-        cutoff = time.time() - 30 * 86400
-        st["history"] = [g for g in st["history"] if g["t"] >= cutoff]
+        st["games_since_check"] += 1   # порядочность считается по всем играм
+        if ranked:                     # в статистику и винрейт идут только рейтинговые
+            st["total_games"] += 1
+            st["wins"] += int(win)
+            entry = {"id": m["match_id"], "t": m["start_time"], "win": win, "d": delta, "r": delta != 0}
+            if delta != 0:
+                entry["m"] = st["mmr"]
+                entry["b"] = st["mmr"] - delta
+            st["history"].append(entry)
+            cutoff = time.time() - 30 * 86400
+            st["history"] = [g for g in st["history"] if g["t"] >= cutoff]
 
         send(st["owner"], report(m, mmr_line, beh_text(st), safe_analyze(m)), markup,
              fancy=True, match_id=m["match_id"])
