@@ -7,7 +7,7 @@
  "games_since_check": 6,
  "total_games": 11,
  "wins": 4,
- "offset": 333341544,
+ "offset": 333341545,
  "history": [
   {
    "id": 9075742548,
@@ -122,5 +122,5 @@
   204862419
  ],
  "verdicts": [],
- "pending": "mmr"
+ "pending": null
 }
