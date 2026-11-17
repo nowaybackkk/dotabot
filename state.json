@@ -1,12 +1,12 @@
 {
  "owner": 613862256,
  "account_id": 190242643,
- "mmr": 5564,
+ "mmr": 5589,
  "behavior": 3184,
- "last_match_id": 9094118210,
- "games_since_check": 10,
- "total_games": 17,
- "wins": 7,
+ "last_match_id": 9094329363,
+ "games_since_check": 11,
+ "total_games": 18,
+ "wins": 8,
  "offset": 333341555,
  "history": [
   {
@@ -167,6 +167,15 @@
    "r": true,
    "m": 5564,
    "b": 5537
+  },
+  {
+   "id": 9094329363,
+   "t": 1794931400,
+   "win": true,
+   "d": 25,
+   "r": true,
+   "m": 5589,
+   "b": 5564
   }
  ],
  "since": 0,
